@@ -101,7 +101,7 @@ CREATE OR REPLACE FUNCTION count_manta_directories_v3() RETURNS TRIGGER AS
                 WHERE _key = OLD.dirname FOR UPDATE);
             IF (tmpcount <= 1) THEN
                 DELETE FROM
-		    manta_directory_counts
+                    manta_directory_counts
                 WHERE
                     _key = OLD.dirname;
             ELSE
