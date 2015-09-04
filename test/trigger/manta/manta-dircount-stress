@@ -11,9 +11,11 @@
  */
 
 /*
- * manta-dircount-stress: directory count stress test.  This program cycles
- * between removing all objects in a target directory and creating them all
- * again and then checking the directory's count.
+ * manta-dircount-stress2: more sophisticated directory count stress test.  As
+ * with its predecessor, this program cycles between removing all objects in a
+ * target directory and creating them all again while checking the directory's
+ * count, but it mixes in both "insert" and "delete" operations at every point
+ * in order to exercise additional race conditions.
  */
 
 var mod_bunyan = require('bunyan');
@@ -27,13 +29,16 @@ var sprintf = require('extsprintf').sprintf;
 var VError = require('verror');
 
 var dcsConcurrency = 150;
-var dcsNobjects = 3000;
-var dcsPath = '/poseidon/stor/MANTA-2720-1';
+var dcsNobjects = 1500;
+var dcsPath = '/poseidon/stor/MANTA-2720-4';
 var dcsObjectPrefix = 'dircountstress.';
+var dcsProb = 0.2;
 var dcsClient;
 var dcsLog;
 var dcsQueue;
 var dcsNiterations;
+var dcsNinserts;
+var dcsNunlinks;
 
 function main()
 {
@@ -46,7 +51,16 @@ function main()
     process.removeAllListeners('uncaughtException');
     dcsQueue = mod_vasync.queue(dcsWork, dcsConcurrency);
     dcsNiterations = 0;
-    dcsRun();
+    dcsNinserts = 0;
+    dcsNunlinks = 0;
+
+    dcsClient.mkdirp(dcsPath, function (err) {
+        if (err) {
+            mod_cmdutil.fail(new VError(err, 'mkdirp "%s"', dcsPath));
+        }
+
+        dcsRun();
+    });
 }
 
 /*
@@ -81,7 +95,8 @@ function dcsRun()
         }
 
         dcsNiterations++;
-        console.log('%d cycles complete', dcsNiterations);
+        console.log('%d cycles complete (%d inserts, %d deletes)',
+            dcsNiterations, dcsNinserts, dcsNunlinks);
         dcsRun();
     });
 }
@@ -124,14 +139,7 @@ function dcsWipe(callback)
 
             barrier.start(obj.name);
             dcsQueue.push(function (queuecb) {
-                dcsClient.unlink(path, function (err2) {
-                    if (err2) {
-                        errSanitize(err2);
-                        mod_cmdutil.fail(
-                            new VError(err2,
-                            'munlink "%s"', path));
-                    }
-
+                dcsDoUnlink(path, dcsProb, 1, function () {
                     queuecb();
                     barrier.done(obj.name);
                 });
@@ -213,26 +221,67 @@ function dcsPopulate(callback)
     objnames.forEach(function (objname) {
         barrier.start(objname);
         dcsQueue.push(function (queuecb) {
-            var stream, path;
-
-            stream = new mod_stream.PassThrough();
-            path = sprintf('%s/%s', dcsPath, objname);
-
-            dcsClient.put(path, stream, function (err) {
-                if (err) {
-                    errSanitize(err);
-                    mod_cmdutil.fail(new VError(err, 'put "%s"', path));
-                }
-
+            var path = sprintf('%s/%s', dcsPath, objname);
+            dcsDoInsert(path, dcsProb, 1, function () {
                 barrier.done(objname);
                 queuecb();
             });
-
-            stream.end('dcs');
         });
     });
 
     barrier.on('drain', function () { callback(); });
+}
+
+/*
+ * Unlink the given Manta object.  With probability "pInsertAfter", re-insert it
+ * after completing the unlink, and don't invoke the callback until that's done.
+ */
+function dcsDoUnlink(path, pInsertAfter, pConverge, callback)
+{
+    dcsClient.unlink(path, function (err) {
+        if (err) {
+            errSanitize(err);
+            mod_cmdutil.fail(new VError(err, 'munlink "%s"', path));
+        }
+
+        dcsNunlinks++;
+
+        if (Math.random() >= pInsertAfter) {
+            callback();
+            return;
+        }
+
+        dcsDoInsert(path, pConverge, 0, callback);
+    });
+}
+
+/*
+ * Create the given Manta object.  With probability "pUnlinkAfter", remove it
+ * after completing the insert, and don't invoke the callback until that's done.
+ */
+function dcsDoInsert(path, pUnlinkAfter, pConverge, callback)
+{
+    var stream;
+
+    stream = new mod_stream.PassThrough();
+
+    dcsClient.put(path, stream, function (err) {
+        if (err) {
+            errSanitize(err);
+            mod_cmdutil.fail(new VError(err, 'put "%s"', path));
+        }
+
+        dcsNinserts++;
+
+        if (Math.random() >= pUnlinkAfter) {
+            callback();
+            return;
+        }
+
+        dcsDoUnlink(path, pConverge, 0, callback);
+    });
+
+    stream.end('dcs');
 }
 
 /*
