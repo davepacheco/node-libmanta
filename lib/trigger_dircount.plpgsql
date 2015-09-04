@@ -104,13 +104,14 @@ CREATE OR REPLACE FUNCTION count_manta_directories_v3() RETURNS TRIGGER AS
                 WHERE
                     _key = OLD.dirname;
             ELSE
-                UPDATE manta_directory_counts
+                UPDATE
+                    manta_directory_counts
                 SET
                     entries = entries - 1
                 WHERE
                     _key = OLD.dirname;
             END IF;
-	    RETURN NULL;
+            RETURN NULL;
         END IF;
     END;
 $FunctionCode$ LANGUAGE plpgsql;
