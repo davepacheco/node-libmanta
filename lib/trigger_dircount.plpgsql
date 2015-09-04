@@ -40,41 +40,106 @@
  * is bounded, and all clients are retrying, then eventually all will succeed
  * because each time the error is returned, one of the clients has succeeded.
  */
-CREATE OR REPLACE FUNCTION count_manta_directories_v2() RETURNS TRIGGER AS
+CREATE OR REPLACE FUNCTION count_manta_directories_v3() RETURNS TRIGGER AS
     $FunctionCode$
     DECLARE tmpcount NUMERIC;
+    DECLARE niters NUMERIC;
     BEGIN
-        IF TG_OP = 'INSERT' THEN
-            IF EXISTS (SELECT entries FROM manta_directory_counts WHERE _key = NEW.dirname) THEN
-                UPDATE
-                    manta_directory_counts
+
+        /*
+         * This operation needs to perform a classic UPSERT, which is to update
+         * a record if it exists or insert one if not.  The "DELETE" case also
+         * seeks to remove a record if the new directory count is 0.  While
+         * modern PostgreSQL versions have good support for UPSERT operations,
+         * we're targeting version 9.2, which does not.  To deal with this, we
+         * use the approach suggested in the "Trapping Errors" section of the
+         * pl/pgSQL documentation, which is based on a loop.  But we bound the
+         * loop to ensure that a bug in this code does not cause queries to hang
+         * forever.
+         */
+        FOR niters IN 1..50 LOOP
+            IF TG_OP = 'INSERT' THEN
+                /*
+                 * If we're invoked for an INSERT, then we first try to bump the
+                 * counter for this directory.  If there is no record for the
+                 * counter, then this query will succeed but update zero rows.
+                 */
+                UPDATE manta_directory_counts
                 SET
                     entries = entries + 1
                 WHERE
                     _key = NEW.dirname;
+
+                /*
+                 * The special boolean variable FOUND will indicate whether the
+                 * query matched any results.  If so, we're done.
+                 */
+                IF FOUND THEN
+                    RAISE NOTICE 'count_manta_..._v3(): AFTER INSERT, USING UPDATE (after % tries)', niters;
+                    RETURN NULL;
+                END IF;
+
+                /*
+                 * The row was not present.  Now try to insert it.  If that
+                 * works, we're done.
+                 */
+                BEGIN
+                    INSERT INTO manta_directory_counts
+                        (_key, _value, _etag, _vnode, entries)
+                    VALUES
+                        (NEW.dirname, '{}', '_trigger', NEW._vnode, 1);
+                    RAISE NOTICE 'count_manta_..._v3(): AFTER INSERT, USING INSERT (after % tries)', niters;
+                    RETURN NULL;
+                EXCEPTION WHEN unique_violation THEN
+                    /*
+                     * We've raced with another operation.  Go to the top of the
+                     * loop to try again.
+                     */
+                END;
             ELSE
-                INSERT INTO manta_directory_counts
-                  (_key, _value, _etag, _vnode, entries)
-                VALUES
-                  (NEW.dirname, '{}', '_trigger', NEW._vnode, 1);
+                tmpcount := (SELECT entries FROM manta_directory_counts
+                    WHERE _key = OLD.dirname);
+                IF (tmpcount <= 1) THEN
+                    /*
+                     * If the current count is 1, then try to remove the record.
+                     * Make sure it still has entries = 1, or we could clobber
+                     * the result of another insert operation.
+                     */
+                    DELETE FROM manta_directory_counts
+                    WHERE
+                        _key = OLD.dirname AND entries = tmpcount;
+
+                    /*
+                     * If that matched any rows, then we're all set.  Otherwise,
+                     * something else bumped up the counter in the meantime, so
+                     * we take another lap.
+                     */
+                    IF FOUND THEN
+                        RAISE NOTICE 'count_manta_..._v3(): AFTER DELETE, USING DELETE (after % tries)', niters;
+                        RETURN NULL;
+                    END IF;
+                ELSE
+                    /*
+                     * Similarly, try to update the record, but only if it still
+                     * has entries > 1.  If "entries" is 1, then we should
+                     * really be doing a delete.  Not handling this case would
+                     * result in a leaked row.
+                     */
+                    UPDATE manta_directory_counts
+                    SET
+                        entries = entries - 1
+                    WHERE
+                        _key = OLD.dirname AND entries > 1;
+
+                    IF FOUND THEN
+                        RAISE NOTICE 'count_manta_..._v3(): AFTER DELETE, USING UPDATE (after % tries)', niters;
+                        RETURN NULL;
+                    END IF;
+                END IF;
             END IF;
-        ELSIF TG_OP = 'DELETE' THEN
-            tmpcount := (SELECT entries FROM manta_directory_counts WHERE _key = OLD.dirname);
-            IF (tmpcount <= 1) THEN
-                DELETE FROM
-                    manta_directory_counts
-                WHERE
-                    _key = OLD.dirname;
-            ELSE
-                UPDATE
-                    manta_directory_counts
-                SET
-                    entries = entries - 1
-                WHERE
-                    _key = OLD.dirname;
-            END IF;
-        END IF;
-        RETURN NULL;
+        END LOOP;
+
+        RAISE EXCEPTION 'count_manta_directories_v3() looped too many times';
     END; 
 $FunctionCode$ LANGUAGE plpgsql;
 
@@ -83,5 +148,5 @@ $FunctionCode$ LANGUAGE plpgsql;
  */
 BEGIN;
 SELECT manta_update_versioned_trigger(
-    'manta', 'count_directories', 2, 'count_manta_directories');
+    'manta', 'count_directories', 3, 'count_manta_directories');
 COMMIT;
