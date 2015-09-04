@@ -11,11 +11,11 @@
  */
 
 /*
- * manta-dircount-stress2: more sophisticated directory count stress test.  As
- * with its predecessor, this program cycles between removing all objects in a
- * target directory and creating them all again while checking the directory's
- * count, but it mixes in both "insert" and "delete" operations at every point
- * in order to exercise additional race conditions.
+ * manta-dircount-stress: directory count stress test.  This program cycles
+ * between removing all objects in a target directory and creating them all
+ * again while checking the directory's count, but it mixes in both "insert" and
+ * "delete" operations at every point in order to exercise additional race
+ * conditions.
  */
 
 var mod_bunyan = require('bunyan');
@@ -30,7 +30,7 @@ var VError = require('verror');
 
 var dcsConcurrency = 150;
 var dcsNobjects = 1500;
-var dcsPath = '/poseidon/stor/MANTA-2720-4';
+var dcsPath = '/poseidon/stor/MANTA-2720-5';
 var dcsObjectPrefix = 'dircountstress.';
 var dcsProb = 0.2;
 var dcsClient;
