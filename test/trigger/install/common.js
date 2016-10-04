@@ -68,8 +68,7 @@ function setup()
         'port': port,
         'connectTimeout': 3000,
         'retry': null,
-        'reconnect': false,
-        'unwrapErrors': true
+        'reconnect': false
     });
 
     return ({
